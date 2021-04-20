@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::iter::repeat_with;
 use std::iter::Peekable;
 use std::vec::IntoIter;
+
 const PRELUDE: &str = r#"
 section	.text
   global _start
@@ -10,15 +12,18 @@ section	.text
 pub struct Assembler {
     bss: Vec<String>,
     code: Vec<String>,
+    data: Vec<String>,
+    pub variables: HashMap<String, String>,
 }
 
 impl<'a> Assembler {
     /// Finalize codegen. Put things together.
     pub fn finalize(&self) -> String {
         format!(
-            "{}\n{}\nsegment .bss\n{}",
+            "{}\n{}\nsection .data\n{}\nsegment .bss\n{}",
             PRELUDE,
             self.code.join("\n"),
+            self.data.join("\n"),
             self.bss.join("\n")
         )
     }
@@ -29,10 +34,9 @@ impl<'a> Assembler {
         self.bss.push(decl);
     }
 
-    // XXX: TODO
-    pub fn define_bytes(&mut self, name: &'a str) {
-        let decl = format!("  {} resb 1", name);
-        self.bss.push(decl);
+    pub fn declare_byte(&mut self, name: &'a str, value: &'a str) {
+        let decl = format!("  {} db {}", name, value);
+        self.data.push(decl);
     }
 
     /// Start a new label
@@ -44,6 +48,10 @@ impl<'a> Assembler {
     /// Push a new instruction. Goes under the current label.
     pub fn inst(&mut self, inst: &'a str) {
         self.code.push(format!("  {}", inst));
+    }
+
+    pub fn declare_comptime(&mut self, name: &'a str, corr: &'a str) {
+        self.variables.insert(name.to_string(), corr.to_string());
     }
 }
 
@@ -82,6 +90,7 @@ pub enum Node {
     Literal(Literal),
     Fn(InBuiltFn),
     Ident(String),
+    Assign(String, Box<Node>),
 }
 
 pub type Program = Vec<Node>;
@@ -104,6 +113,14 @@ impl<'a> Compiler {
     fn compile_node(&mut self, node: Node) -> String {
         let r: String = repeat_with(fastrand::alphanumeric).take(10).collect();
         match node {
+            Node::Assign(name, value) => {
+                let value = self.compile_node(*value);
+                if value.starts_with("'") {
+                    self.asm.declare_byte(&name, &value);
+                } else {
+                    self.asm.declare_comptime(&name, &value);
+                }
+            }
             Node::Infix { lhs, rhs, op } => {
                 let lhs = self.compile_node(*lhs);
                 let rhs = self.compile_node(*rhs);
@@ -139,11 +156,18 @@ impl<'a> Compiler {
                     return format!("'{}'", int);
                 }
             },
-            Node::Ident(idt) => return format!("'{}'", idt),
+            Node::Ident(idt) => {
+                return if let Some(holding) = self.asm.variables.get(&idt) {
+                    holding.to_string()
+                } else {
+                    idt
+                }
+            }
             Node::Fn(inbuilt) => match inbuilt {
                 InBuiltFn::Print(node) => {
                     let value = self.compile_node(*node);
                     self.asm.inst(&format!("mov ecx, {}", value));
+                    // self.asm.inst("sub ecx, '0'");
                     self.asm.inst("mov edx, 2");
                     self.asm.inst("mov ebx, 1");
                     self.asm.inst("mov eax, 4");
@@ -163,27 +187,59 @@ pub enum Token {
     Literal(Literal),
     Ident(String),
     Plus,
+    LParen,
+    RParen,
+    Equal,
+}
+
+///
+fn ident(candidate: String) -> Token {
+    match candidate.as_ref() {
+        "let" => Token::Let,
+        _ => Token::Ident(candidate),
+    }
 }
 
 pub fn lex(input: &str) -> Vec<Token> {
     let mut tokens: Vec<Token> = vec![];
-    'o: for ch in input.as_bytes() {
+    let mut input = input.as_bytes().into_iter().peekable();
+    'o: loop {
+        let ch = input.next();
+        if ch.is_none() {
+            break 'o;
+        }
+        let ch = ch.unwrap();
         let token = match ch {
             b'+' => Token::Plus,
+            b'(' => Token::LParen,
+            b')' => Token::RParen,
+            b'=' => Token::Equal,
             b'0'..=b'9' => {
                 let mut num = String::new();
                 num.push(*ch as char);
-                Token::Literal(Literal::Int(num.parse::<i64>().unwrap()))
+                'i: loop {
+                    let next_ch = input.peek();
+                    match next_ch {
+                        Some(b'0'..=b'9') => {
+                            num.push(**next_ch.unwrap() as char);
+                            input.next();
+                        }
+                        _ => break 'i Token::Literal(Literal::Int(num.parse::<i64>().unwrap())),
+                    }
+                }
             }
             b'a'..=b'z' | b'A'..=b'Z' | b'_' => {
                 let mut idt = String::new();
+                idt.push(*ch as char);
                 'e: loop {
-                    match ch {
-                        b'a'..=b'z' | b'A'..=b'Z' | b'_' => {
-                            idt.push(*ch as char);
+                    let next_ch = input.peek();
+                    match next_ch {
+                        Some(b'a'..=b'z' | b'A'..=b'Z' | b'_') => {
+                            idt.push(**next_ch.unwrap() as char);
+                            input.next();
                         }
                         _ => {
-                            break 'e Token::Ident(idt);
+                            break 'e ident(idt);
                         }
                     }
                 }
@@ -221,8 +277,30 @@ impl Parser {
         };
 
         let token = token.unwrap();
+
         let lhs = match token {
             Token::Literal(literal) => Node::Literal(literal),
+            Token::Let => {
+                match tokens.peek() {
+                    Some(Token::Ident(name)) => {
+                        let name = name.to_string();
+                        tokens.next();
+                        tokens.next(); // Skip `=`
+                        let value = Self::parse_token(tokens).unwrap();
+                        Node::Assign(name, Box::new(value))
+                    }
+                    _ => panic!("Expected Ident after `let`"),
+                }
+            }
+            Token::Ident(ident) => match tokens.peek() {
+                Some(Token::LParen) => {
+                    tokens.next();
+                    let param = Self::parse_token(tokens).unwrap();
+                    tokens.next();
+                    Node::Fn(InBuiltFn::Print(Box::new(param)))
+                }
+                _ => Node::Ident(ident),
+            },
             _ => panic!("TODO"),
         };
 
