@@ -1,7 +1,7 @@
 mod x86;
 
 use crate::x86::*;
-const TEST1: &str = "let x = 1 + 1; print(x)";
+const TEST1: &str = "if 1 { print(1 + 2) }";
 fn main() {
     let tokens = lex(TEST1);
     let program = Parser::parse(tokens);

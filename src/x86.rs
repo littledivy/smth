@@ -91,6 +91,10 @@ pub enum Node {
     Fn(InBuiltFn),
     Ident(String),
     Assign(String, Box<Node>),
+    If {
+        cond: Box<Node>,
+        consq: Vec<Node>,
+    },
 }
 
 pub type Program = Vec<Node>;
@@ -151,6 +155,16 @@ impl<'a> Compiler {
                     }
                 }
             }
+            Node::If { cond, consq } => {
+                let cond = self.compile_node(*cond);
+                self.asm.inst(&format!("cmp {}, 1", cond));
+                self.asm.inst("je L1");
+
+                self.asm.label("L1");
+                for node in consq {
+                    self.compile_node(node);
+                }
+            }
             Node::Literal(lit) => match lit {
                 Literal::Int(int) => {
                     return format!("'{}'", int);
@@ -184,11 +198,14 @@ impl<'a> Compiler {
 #[derive(Debug)]
 pub enum Token {
     Let,
+    If,
     Literal(Literal),
     Ident(String),
     Plus,
     LParen,
     RParen,
+    LBrace,
+    RBrace,
     Equal,
 }
 
@@ -196,6 +213,7 @@ pub enum Token {
 fn ident(candidate: String) -> Token {
     match candidate.as_ref() {
         "let" => Token::Let,
+        "if" => Token::If,
         _ => Token::Ident(candidate),
     }
 }
@@ -214,6 +232,8 @@ pub fn lex(input: &str) -> Vec<Token> {
             b'(' => Token::LParen,
             b')' => Token::RParen,
             b'=' => Token::Equal,
+            b'{' => Token::LBrace,
+            b'}' => Token::RBrace,
             b'0'..=b'9' => {
                 let mut num = String::new();
                 num.push(*ch as char);
@@ -301,6 +321,31 @@ impl Parser {
                 }
                 _ => Node::Ident(ident),
             },
+            // Parses `If` statements.
+            // if cond {
+            //    ...
+            //    block statement
+            //    ...
+            // }
+            Token::If => {
+                let condition = Self::parse_token(tokens).unwrap();
+                let mut block_stmt: Vec<Node> = vec![];
+                // Skip `{`
+                tokens.next();
+                // Parse block statement.
+                while let Some(next_token) = tokens.peek() {
+                    match next_token {
+                        &Token::RBrace => break,
+                        _ => block_stmt.push(Self::parse_token(tokens).unwrap()),
+                    }
+                }
+                // Skip `}`
+                tokens.next();
+                Node::If {
+                    cond: Box::new(condition),
+                    consq: block_stmt,
+                }
+            }
             _ => panic!("TODO"),
         };
 
