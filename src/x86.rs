@@ -95,6 +95,10 @@ pub enum Node {
         cond: Box<Node>,
         consq: Vec<Node>,
     },
+    While {
+        cond: Box<Node>,
+        consq: Vec<Node>,
+    },
 }
 
 pub type Program = Vec<Node>;
@@ -159,11 +163,22 @@ impl<'a> Compiler {
                 let cond = self.compile_node(*cond);
                 self.asm.inst(&format!("cmp {}, 1", cond));
                 self.asm.inst("je L1");
-
+                // TODO: Generate unique labels
                 self.asm.label("L1");
                 for node in consq {
                     self.compile_node(node);
                 }
+            }
+            Node::While { cond, consq } => {
+                // TODO: Generate unique labels
+                self.asm.label("L2");
+                for node in consq {
+                    self.compile_node(node);
+                }
+
+                let cond = self.compile_node(*cond);
+                self.asm.inst(&format!("cmp {}, 1", cond));
+                self.asm.inst("je L2");
             }
             Node::Literal(lit) => match lit {
                 Literal::Int(int) => {
@@ -199,6 +214,7 @@ impl<'a> Compiler {
 pub enum Token {
     Let,
     If,
+    While,
     Literal(Literal),
     Ident(String),
     Plus,
@@ -214,6 +230,7 @@ fn ident(candidate: String) -> Token {
     match candidate.as_ref() {
         "let" => Token::Let,
         "if" => Token::If,
+        "while" => Token::While,
         _ => Token::Ident(candidate),
     }
 }
@@ -342,6 +359,25 @@ impl Parser {
                 // Skip `}`
                 tokens.next();
                 Node::If {
+                    cond: Box::new(condition),
+                    consq: block_stmt,
+                }
+            }
+            Token::While => {
+                let condition = Self::parse_token(tokens).unwrap();
+                let mut block_stmt: Vec<Node> = vec![];
+                // Skip `{`
+                tokens.next();
+                // Parse block statement.
+                while let Some(next_token) = tokens.peek() {
+                    match next_token {
+                        &Token::RBrace => break,
+                        _ => block_stmt.push(Self::parse_token(tokens).unwrap()),
+                    }
+                }
+                // Skip `}`
+                tokens.next();
+                Node::While {
                     cond: Box::new(condition),
                     consq: block_stmt,
                 }
